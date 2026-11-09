@@ -21,6 +21,7 @@ Public API
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -47,6 +48,38 @@ _client = None
 _bank_ready = False
 _lock = threading.Lock()
 
+_hindsight_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="hindsight"
+)
+
+
+def _call_hindsight(method_name: str, **kwargs):
+    """Run Hindsight SDK operations on one dedicated worker thread."""
+    client = _get_client()
+    method = getattr(client, method_name)
+
+    return _hindsight_executor.submit(
+        method, **kwargs
+    ).result(timeout=TIMEOUT + 30)
+def close_hindsight():
+    """Close the Hindsight client safely on its worker thread."""
+    global _client, _bank_ready
+
+    if _client is None:
+        return
+
+    try:
+        _hindsight_executor.submit(_client.close).result(
+            timeout=TIMEOUT + 30
+        )
+        _client = None
+        _bank_ready = False
+        return {"ok": True, "error": None}
+
+    except Exception as exc:
+        return {"ok": False, "error": _friendly_error(exc)}
+
 
 class MemoryUnavailable(Exception):
     """Hindsight cannot be used (missing package / not reachable / bad credentials)."""
@@ -69,9 +102,11 @@ def _friendly_error(exc: Exception) -> str:
     return f"Hindsight error: {msg[:300]}"
 
 
+
 def _get_client():
     """Create the Hindsight client once and make sure the shared memory bank exists."""
     global _client, _bank_ready
+
     with _lock:
         if _client is None:
             try:
@@ -80,24 +115,35 @@ def _get_client():
                 raise MemoryUnavailable(
                     "Package 'hindsight-client' is not installed. Run: pip install hindsight-client"
                 ) from exc
-            kwargs: dict[str, Any] = {"base_url": BASE_URL, "timeout": TIMEOUT}
+
+            kwargs: dict[str, Any] = {
+                "base_url": BASE_URL,
+                "timeout": TIMEOUT
+            }
+
             if API_KEY:
                 kwargs["api_key"] = API_KEY
+
             _client = Hindsight(**kwargs)
 
         if not _bank_ready:
             try:
-                _client.create_bank(
+                _hindsight_executor.submit(
+                    _client.create_bank,
                     bank_id=BANK_ID,
                     name="DevMemory AI",
-                    mission=("Engineering memory for incidents, code reviews and deployment failures. "
-                             "Always distinguish developer-verified fixes from unverified AI suggestions "
-                             "and from fixes that were tried and failed."),
-                )
+                    mission=(
+                        "Engineering memory for incidents, code reviews and deployment failures. "
+                        "Always distinguish developer-verified fixes from unverified AI suggestions "
+                        "and from fixes that were tried and failed."
+                    ),
+                ).result(timeout=TIMEOUT + 30)
+
             except Exception:
-                # Bank probably exists already; retain/recall will surface real connection problems.
                 pass
+
             _bank_ready = True
+
         return _client
 
 
@@ -196,27 +242,35 @@ def classify_memory(text: str) -> str:
 # --------------------------------------------------------------------------- #
 # retain / recall / reflect
 # --------------------------------------------------------------------------- #
+
 def store_memory(data: dict) -> dict:
     """
     Retain one structured record in the shared Hindsight bank.
-    data keys: module, problem, root_cause, suggested_fix, outcome
-               ("success" | "failure" | "unverified" | "convention"),
-               verified_by_developer (bool), notes, problem_id (optional)
     """
     try:
         module = str(data.get("module", "")).strip().lower()
+
         if module not in VALID_MODULES:
-            return {"ok": False, "error": f"module must be one of {sorted(VALID_MODULES)}", "document_id": None}
+            return {
+                "ok": False,
+                "error": f"module must be one of {sorted(VALID_MODULES)}",
+                "document_id": None,
+            }
+
         if not str(data.get("problem", "")).strip():
-            return {"ok": False, "error": "'problem' is required.", "document_id": None}
+            return {
+                "ok": False,
+                "error": "'problem' is required.",
+                "document_id": None,
+            }
 
         outcome = _norm_outcome(str(data.get("outcome", "")))
         content = build_memory_text(data)
         problem_id = str(data.get("problem_id") or uuid.uuid4().hex[:8])
         document_id = f"{problem_id}-{outcome}"
 
-        client = _get_client()
-        client.retain(
+        _call_hindsight(
+            "retain",
             bank_id=BANK_ID,
             content=content,
             context=f"devmemory {module} {outcome}",
@@ -225,14 +279,27 @@ def store_memory(data: dict) -> dict:
             metadata={
                 "module": module,
                 "outcome": outcome,
-                "verified_by_developer": str(bool(data.get("verified_by_developer", False))).lower(),
+                "verified_by_developer": str(
+                    bool(data.get("verified_by_developer", False))
+                ).lower(),
                 "problem_id": problem_id,
             },
-            retain_async=False,  # block until stored, so an immediate recall can find it
+            retain_async=False,
         )
-        return {"ok": True, "error": None, "document_id": document_id}
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": _friendly_error(exc), "document_id": None}
+
+        return {
+            "ok": True,
+            "error": None,
+            "document_id": document_id,
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": _friendly_error(exc),
+            "document_id": None,
+        }
+
 
 
 def retrieve_memory(query: str, module: str | None = None) -> dict:
@@ -245,7 +312,13 @@ def retrieve_memory(query: str, module: str | None = None) -> dict:
             query = f"{module} module: {query}"
 
         client = _get_client()
-        response = client.recall(bank_id=BANK_ID, query=query, max_tokens=2048, budget="mid")
+        response = _call_hindsight(
+                            "recall",
+                            bank_id=BANK_ID,
+                            query=query,
+                            max_tokens=2048,
+                            budget="mid",
+                        )
 
         memories: list[dict] = []
         seen: set[str] = set()
@@ -271,7 +344,7 @@ def reflect_memory(query: str, context: str | None = None) -> dict:
         kwargs: dict[str, Any] = {"bank_id": BANK_ID, "query": sanitize(query), "budget": "low"}
         if context:
             kwargs["context"] = sanitize(context)
-        answer = client.reflect(**kwargs)
+        answer = _call_hindsight("reflect", **kwargs)
         return {"ok": True, "text": (getattr(answer, "text", "") or "").strip(), "error": None}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "text": "", "error": _friendly_error(exc)}
@@ -281,7 +354,12 @@ def list_memories(limit: int = 50) -> dict:
     """Best-effort listing for the Memory Explorer screen."""
     try:
         client = _get_client()
-        resp = client.list_memories(bank_id=BANK_ID, limit=limit, offset=0)
+        resp = _call_hindsight(
+                    "list_memories",
+                    bank_id=BANK_ID,
+                    limit=limit,
+                    offset=0,
+                )
         raw = (getattr(resp, "items", None) or getattr(resp, "memories", None)
                or getattr(resp, "results", None) or (resp if isinstance(resp, list) else []))
         items = []
@@ -296,7 +374,7 @@ def list_memories(limit: int = 50) -> dict:
 def memory_health() -> dict:
     try:
         client = _get_client()
-        client.get_version()
+        _call_hindsight("get_version")
         return {"ok": True, "error": None, "bank_id": BANK_ID, "base_url": BASE_URL}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": _friendly_error(exc), "bank_id": BANK_ID, "base_url": BASE_URL}
