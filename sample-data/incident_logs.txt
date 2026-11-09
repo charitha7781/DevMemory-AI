@@ -1,0 +1,10 @@
+
+2026-11-09 10:15:21 ERROR [OrderService] Failed to process order
+2026-11-09 10:15:21 ERROR [DatabaseConnection] Connection timeout
+2026-11-09 10:15:22 WARN  [DatabaseConnection] Retrying connection (1/3)
+2026-11-09 10:15:27 WARN  [DatabaseConnection] Retrying connection (2/3)
+2026-11-09 10:15:32 ERROR [DatabaseConnection] Connection pool exhausted
+2026-11-09 10:15:32 ERROR [OrderService] java.sql.SQLTransientConnectionException:
+Connection is not available, request timed out after 30000ms.
+2026-11-09 10:15:33 ERROR [OrderService] Order processing failed.
+2026-11-09 10:15:33 INFO  [Application] Service is still running.

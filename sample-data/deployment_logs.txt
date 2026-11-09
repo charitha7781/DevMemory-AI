@@ -1,0 +1,11 @@
+
+2026-11-09 11:20:01 INFO  [GitHub Actions] Workflow started
+2026-11-09 11:20:03 INFO  [Build] Installing dependencies
+2026-11-09 11:20:08 INFO  [Build] Dependencies installed successfully
+2026-11-09 11:20:12 INFO  [Test] Running application tests
+2026-11-09 11:20:15 INFO  [Test] Tests completed
+2026-11-09 11:20:18 INFO  [Docker] Building Docker image
+2026-11-09 11:20:24 ERROR [Docker] Failed to build image
+2026-11-09 11:20:24 ERROR [Docker] COPY failed: requirements.txt not found
+2026-11-09 11:20:25 ERROR [Deploy] Deployment aborted
+2026-11-09 11:20:25 INFO  [GitHub Actions] Workflow failed
