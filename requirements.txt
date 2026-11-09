@@ -1,2 +1,5 @@
 streamlit
 python-dotenv
+hindsight-client
+google-genai
+pytest
