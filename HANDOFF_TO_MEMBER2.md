@@ -52,6 +52,6 @@ if r:
 
 ## Setup
 Env var names (values stay in your local `.env`): `HINDSIGHT_BASE_URL`, `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_ID`, `LLM_API_KEY`, `LLM_MODEL`.
-Dependencies: `streamlit python-dotenv hindsight-client google-genai pytest`.
+Dependencies: `streamlit python-dotenv hindsight-client groq pytest`.
 Sample input that works: `sample-data/incident_logs.txt`.
 Known limitations: retain takes a few seconds (Hindsight extracts facts); untested AI suggestions are intentionally NOT stored until feedback is given.

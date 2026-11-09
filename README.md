@@ -1,6 +1,6 @@
 # DevMemory AI
 
-DevMemory AI is an AI-assisted engineering knowledge system for analysing production incidents, reviewing source code, and diagnosing deployment/CI-CD failures. It uses Google Gemini for analysis and Hindsight as long-term engineering memory.
+DevMemory AI is an AI-assisted engineering knowledge system for analysing production incidents, reviewing source code, and diagnosing deployment/CI-CD failures. It uses Groq for analysis and Hindsight as long-term engineering memory.
 
 ## Core capabilities
 
@@ -33,7 +33,7 @@ Developer / Streamlit UI (Member 2)
    llm_service.py   hindsight_memory.py
         |                 |
         v                 v
-  Google Gemini       Hindsight
+  Groq                Hindsight
 ```
 
 `ai_engine.py` is the integration interface intended for the Streamlit layer. Shared helpers are in `engine_utils.py`.
@@ -41,7 +41,7 @@ Developer / Streamlit UI (Member 2)
 ## Requirements
 
 - Python 3.10 or newer (the code uses modern type annotations)
-- Google Gemini API key
+- Groq API key
 - A reachable Hindsight server/service and, if required by the deployment, a Hindsight API key
 
 ## Setup
@@ -76,8 +76,8 @@ Developer / Streamlit UI (Member 2)
    HINDSIGHT_BASE_URL=http://localhost:8888
    HINDSIGHT_API_KEY=
    HINDSIGHT_BANK_ID=devmemory-ai
-   LLM_API_KEY=your_gemini_api_key
-   LLM_MODEL=gemini-2.5-flash
+   LLM_API_KEY=your_groq_api_key
+   LLM_MODEL=openai/gpt-oss-120b
    ```
 
    Keep `.env` private. Never commit real credentials. The Hindsight service must be running and reachable at `HINDSIGHT_BASE_URL` before real memory operations can succeed.
@@ -119,7 +119,7 @@ Run the real Hindsight retain/recall/reflect check after configuring a live Hind
 python tests/test_memory.py
 ```
 
-Run the real incident + developer-feedback demonstration after configuring both Gemini and Hindsight:
+Run the real incident + developer-feedback demonstration after configuring both Groq and Hindsight:
 
 ```bash
 python tests/test_incident.py
@@ -141,7 +141,7 @@ The real integration scripts are intentionally separate from the offline pytest 
 |---|---|
 | `ai_engine.py` | Unified public interface for the UI |
 | `hindsight_memory.py` | Hindsight client, memory storage/retrieval, feedback, sanitisation |
-| `llm_service.py` | Google Gemini integration and JSON response parsing |
+| `llm_service.py` | Groq integration and JSON response parsing |
 | `incident_engine.py` | Incident log analysis |
 | `code_review_engine.py` | AI-assisted source-code review |
 | `deployment_engine.py` | Deployment and CI/CD log analysis |

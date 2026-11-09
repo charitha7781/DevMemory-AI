@@ -21,7 +21,7 @@ Public API
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 import json
 import os
 import re
@@ -40,13 +40,17 @@ BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://localhost:8888")
 API_KEY = os.getenv("HINDSIGHT_API_KEY") or None
 TIMEOUT = float(os.getenv("HINDSIGHT_TIMEOUT", "90"))
 MAX_RECALL = int(os.getenv("HINDSIGHT_MAX_RECALL", "6"))
+EXECUTOR_TIMEOUT = TIMEOUT + 30
 
 VALID_MODULES = {"incident", "code_review", "deployment"}
 PENDING_FILE = Path(__file__).resolve().parent / ".pending_analyses.json"
 
 _client = None
 _bank_ready = False
+_bank_error: str | None = None
 _lock = threading.Lock()
+_shutdown_lock = threading.Lock()
+_shutdown = False
 
 _hindsight_executor = ThreadPoolExecutor(
     max_workers=1,
@@ -54,31 +58,69 @@ _hindsight_executor = ThreadPoolExecutor(
 )
 
 
+def _submit_and_wait(fn, *args, **kwargs):
+    """Submit work to the Hindsight worker and wait with a bounded timeout."""
+    future = _hindsight_executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=EXECUTOR_TIMEOUT)
+    except FuturesTimeout as exc:
+        future.cancel()
+        raise MemoryUnavailable(
+            f"Hindsight operation timed out after {EXECUTOR_TIMEOUT:.0f}s."
+        ) from exc
+
+
 def _call_hindsight(method_name: str, **kwargs):
     """Run Hindsight SDK operations on one dedicated worker thread."""
     client = _get_client()
     method = getattr(client, method_name)
 
-    return _hindsight_executor.submit(
-        method, **kwargs
-    ).result(timeout=TIMEOUT + 30)
-def close_hindsight():
-    """Close the Hindsight client safely on its worker thread."""
-    global _client, _bank_ready
+    return _submit_and_wait(method, **kwargs)
 
-    if _client is None:
-        return
 
-    try:
-        _hindsight_executor.submit(_client.close).result(
-            timeout=TIMEOUT + 30
-        )
-        _client = None
-        _bank_ready = False
+def _close_client():
+    """Close and reset the shared client on the executor worker thread."""
+    global _client, _bank_ready, _bank_error
+
+    client = _client
+    _client = None
+    _bank_ready = False
+    _bank_error = None
+
+    if client is None:
         return {"ok": True, "error": None}
 
+    try:
+        client.close()
+        return {"ok": True, "error": None}
     except Exception as exc:
         return {"ok": False, "error": _friendly_error(exc)}
+
+
+def close_hindsight():
+    """Close the Hindsight client on its worker thread. Safe to call repeatedly."""
+    if _shutdown:
+        return {"ok": False, "error": "Hindsight executor has been shut down."}
+
+    try:
+        return _submit_and_wait(_close_client)
+    except Exception as exc:
+        return {"ok": False, "error": _friendly_error(exc)}
+
+
+def shutdown_hindsight():
+    """Close the client and stop the worker thread. Idempotent; not reusable afterwards."""
+    global _shutdown
+
+    with _shutdown_lock:
+        if _shutdown:
+            return {"ok": True, "error": None}
+
+        result = close_hindsight()
+        _hindsight_executor.shutdown(wait=True)
+        _shutdown = True
+
+    return result
 
 
 class MemoryUnavailable(Exception):
@@ -103,48 +145,65 @@ def _friendly_error(exc: Exception) -> str:
 
 
 
-def _get_client():
-    """Create the Hindsight client once and make sure the shared memory bank exists."""
-    global _client, _bank_ready
+def _init_client():
+    """Create and initialise the Hindsight client on the executor worker thread."""
+    global _client, _bank_ready, _bank_error
 
-    with _lock:
-        if _client is None:
-            try:
-                from hindsight_client import Hindsight
-            except ImportError as exc:
-                raise MemoryUnavailable(
-                    "Package 'hindsight-client' is not installed. Run: pip install hindsight-client"
-                ) from exc
+    if _client is None:
+        try:
+            from hindsight_client import Hindsight
+        except ImportError as exc:
+            raise MemoryUnavailable(
+                "Package 'hindsight-client' is not installed. Run: pip install hindsight-client"
+            ) from exc
 
-            kwargs: dict[str, Any] = {
-                "base_url": BASE_URL,
-                "timeout": TIMEOUT
-            }
+        kwargs: dict[str, Any] = {
+            "base_url": BASE_URL,
+            "timeout": TIMEOUT
+        }
 
-            if API_KEY:
-                kwargs["api_key"] = API_KEY
+        if API_KEY:
+            kwargs["api_key"] = API_KEY
 
-            _client = Hindsight(**kwargs)
+        _client = Hindsight(**kwargs)
+        _bank_ready = False
 
-        if not _bank_ready:
-            try:
-                _hindsight_executor.submit(
-                    _client.create_bank,
-                    bank_id=BANK_ID,
-                    name="DevMemory AI",
-                    mission=(
-                        "Engineering memory for incidents, code reviews and deployment failures. "
-                        "Always distinguish developer-verified fixes from unverified AI suggestions "
-                        "and from fixes that were tried and failed."
-                    ),
-                ).result(timeout=TIMEOUT + 30)
-
-            except Exception:
-                pass
-
-            _bank_ready = True
-
+    if _bank_ready:
         return _client
+
+    try:
+        _client.create_bank(
+            bank_id=BANK_ID,
+            name="DevMemory AI",
+            mission=(
+                "Engineering memory for incidents, code reviews and deployment failures. "
+                "Always distinguish developer-verified fixes from unverified AI suggestions "
+                "and from fixes that were tried and failed."
+            ),
+        )
+        _bank_ready = True
+        _bank_error = None
+
+    except Exception as exc:
+        # An existing bank is the common "failure"; anything else leaves the bank
+        # unready so a later call can retry instead of caching a false success.
+        message = str(exc).lower()
+        if any(k in message for k in ("already exists", "already exist", "duplicate", "conflict", "409")):
+            _bank_ready = True
+            _bank_error = None
+        else:
+            _bank_ready = False
+            _bank_error = _friendly_error(exc)
+
+    return _client
+
+
+def _get_client():
+    """Return the shared client, built and initialised on the worker thread."""
+    if _shutdown:
+        raise MemoryUnavailable("Hindsight executor has been shut down.")
+
+    return _submit_and_wait(_init_client)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +370,6 @@ def retrieve_memory(query: str, module: str | None = None) -> dict:
         if module:
             query = f"{module} module: {query}"
 
-        client = _get_client()
         response = _call_hindsight(
                             "recall",
                             bank_id=BANK_ID,
@@ -340,7 +398,6 @@ def retrieve_memory(query: str, module: str | None = None) -> dict:
 def reflect_memory(query: str, context: str | None = None) -> dict:
     """Ask Hindsight to reflect (higher-level insight) over stored memories."""
     try:
-        client = _get_client()
         kwargs: dict[str, Any] = {"bank_id": BANK_ID, "query": sanitize(query), "budget": "low"}
         if context:
             kwargs["context"] = sanitize(context)
@@ -353,7 +410,6 @@ def reflect_memory(query: str, context: str | None = None) -> dict:
 def list_memories(limit: int = 50) -> dict:
     """Best-effort listing for the Memory Explorer screen."""
     try:
-        client = _get_client()
         resp = _call_hindsight(
                     "list_memories",
                     bank_id=BANK_ID,
@@ -373,11 +429,12 @@ def list_memories(limit: int = 50) -> dict:
 
 def memory_health() -> dict:
     try:
-        client = _get_client()
         _call_hindsight("get_version")
-        return {"ok": True, "error": None, "bank_id": BANK_ID, "base_url": BASE_URL}
+        return {"ok": True, "error": None, "bank_id": BANK_ID, "base_url": BASE_URL,
+                "bank_error": _bank_error}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": _friendly_error(exc), "bank_id": BANK_ID, "base_url": BASE_URL}
+        return {"ok": False, "error": _friendly_error(exc), "bank_id": BANK_ID, "base_url": BASE_URL,
+                "bank_error": _bank_error}
 
 
 # --------------------------------------------------------------------------- #
